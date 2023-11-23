@@ -1,0 +1,28 @@
+[package]
+name = "pawndropper"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4"
+env_logger = "0.10.1"
+rustyline = "12.0.0"
+rand = "0.8.5"
+rayon = "1.8.0"
+dashmap = { version = "5.5.3", features = ["rayon"] }
+clap = { version = "4.4.8", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[dev-dependencies]
+once_cell = "1.18.0"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
