@@ -34,14 +34,14 @@ pub struct GameState<'a> {
     pub half_move_of_last_capture: usize,
     pub threefold_repetition: bool,
 
-    pub pos_hash: u64,
-    position_occurance_counter: HashMap<u64, usize>,
+    pub pos_hash: u128,
+    position_occurance_counter: HashMap<u128, usize>,
     zobrist_hasher: ZobristHasher
 }
 
 impl<'a> GameState<'a> {
-    const POSITION_OCCURANCE_CAPACITY: usize = 100;
-    const MOVES_RESERVE_SIZE: usize = 64;
+    const POSITION_OCCURANCE_CAPACITY: usize = 500;
+    const MOVES_RESERVE_SIZE: usize = 40;
 
     pub fn new(pl_moves: &'a MoveBitboards, magics: &'a MagicBitboard) -> Self {
         let mut gs = Self {
@@ -56,7 +56,7 @@ impl<'a> GameState<'a> {
             half_move_of_last_capture: 0,
             threefold_repetition: false,
 
-            pos_hash: 0u64,
+            pos_hash: 0u128,
             position_occurance_counter: HashMap::with_capacity(Self::POSITION_OCCURANCE_CAPACITY),
             zobrist_hasher: ZobristHasher::new(),
         };
@@ -80,7 +80,7 @@ impl<'a> GameState<'a> {
             half_move_of_last_capture: 0,
             threefold_repetition: false,
 
-            pos_hash: 0u64,
+            pos_hash: 0u128,
             position_occurance_counter: HashMap::with_capacity(Self::POSITION_OCCURANCE_CAPACITY),
             zobrist_hasher: ZobristHasher::new(),
         };
@@ -134,13 +134,23 @@ impl<'a> GameState<'a> {
     pub fn update_board_undo_move(
         &mut self,
         m: &Move,
+        pos_hash: u128,
         castling_right_long: &[bool; Side::N_SIDES],
         castling_right_short: &[bool; Side::N_SIDES],
         half_move_of_last_capture: usize
     ) {
+        // Recalculate hash for previous position after decreasing position counter
+        // for the position resulting from the played move
+        self.position_occurance_counter.entry(pos_hash)
+            .and_modify(|c| *c -= 1 );
+
+        self.threefold_repetition = false;
+
         self.board.undo_move(m, castling_right_long, castling_right_short);
 
         self.update_occupation_boards();
+
+        self.pos_hash = self.zobrist_hasher.hash(&self.board);
 
         // Restore move number
         self.half_move_number -= 1;
@@ -150,14 +160,6 @@ impl<'a> GameState<'a> {
 
         // Restore last capture for fifty move rule
         self.half_move_of_last_capture = half_move_of_last_capture;
-
-        // Recalculate hash for previous position after decreasing position counter
-        // for the position resulting from the played move
-        self.position_occurance_counter.entry(self.pos_hash)
-            .and_modify(|c| *c -= 1 );
-        self.pos_hash = self.zobrist_hasher.hash(&self.board);
-
-        self.threefold_repetition = false;
     }
 
     pub fn get_move_result(&self, legal_moves_opposite: &Vec<Move>, in_check: bool) -> Option<MoveResult> {
@@ -236,7 +238,7 @@ impl<'a> GameState<'a> {
                     &enemy_attack_bb,
                     &pin_masks,
                     &mut move_list,
-                    &king_ray_mask
+                    king_ray_mask
                 );
                 for piece in Piece::ALL_BUT_KING {
                     self.get_legal_moves_for_piece_with_mask(
@@ -244,7 +246,7 @@ impl<'a> GameState<'a> {
                         &enemy_attack_bb,
                         &pin_masks,
                         &mut move_list,
-                        &move_mask,
+                        move_mask,
                     );
                 }
             } else {
@@ -264,7 +266,7 @@ impl<'a> GameState<'a> {
                     &enemy_attack_bb,
                     &pin_masks,
                     &mut move_list,
-                    &king_ray_mask
+                    king_ray_mask
                 );
             }
         }
@@ -284,7 +286,7 @@ impl<'a> GameState<'a> {
             enemy_attack_bb,
             pins,
             move_list,
-            &0xffffffffffffffff,
+            0xffffffffffffffff,
         )
     }
 
@@ -294,7 +296,7 @@ impl<'a> GameState<'a> {
         enemy_attack_bb: &u64,
         pin_masks: &[u64; N_SQUARES],
         move_list: &mut Vec<Move>,
-        mask: &u64,
+        mask: u64,
     ) {
         let mut piece_bb = self.board[(piece, self.board.side_to_move)];
         while piece_bb != 0 {
@@ -382,8 +384,8 @@ impl<'a> GameState<'a> {
                 move_list.push(Move {
                     from_square: square,
                     to_square: target_square,
-                    move_type: move_type,
-                    piece: piece,
+                    move_type,
+                    piece,
                     side: self.board.side_to_move,
                 });
             }
@@ -411,8 +413,8 @@ impl<'a> GameState<'a> {
             move_list.push(Move {
                 from_square: square,
                 to_square: target_square,
-                move_type: move_type,
-                piece: piece,
+                move_type,
+                piece,
                 side: self.board.side_to_move,
             });
         }
@@ -441,7 +443,7 @@ impl<'a> GameState<'a> {
         // Check for captures
         let capture_squares = &self.pl_moves.pawn_capture_moves[self.board.side_to_move as usize][square];
         *moves_bb |= capture_squares
-            & (self.occupation_boards[self.board.side_to_move.opposite() as usize] | 1 << self.board.en_passant_square);
+            & (self.occupation_boards[self.board.side_to_move.opposite() as usize] | (1 << self.board.en_passant_square));
     }
 
     /// Update legal slider moves, removing moves that are blocked by other pieces
@@ -480,7 +482,6 @@ impl<'a> GameState<'a> {
     /// by enemy pieces also become illegal.
     ///
     /// * `moves_bb`: Moves bitboard
-    #[inline]
     fn remove_friendly_moves(&self, moves_bb: &mut u64) {
         *moves_bb &= !self.occupation_boards[self.board.side_to_move as usize];
     }
@@ -1578,11 +1579,18 @@ mod tests {
         };
 
         game.make_move(&m);
+        let pos_hash = game.pos_hash;
         let castling_right_long = game.board.castling_right_long;
         let castling_right_short = game.board.castling_right_short;
         let half_move_of_last_capture = game.half_move_of_last_capture;
 
-        game.update_board_undo_move(&m, &castling_right_long, &castling_right_short, half_move_of_last_capture);
+        game.update_board_undo_move(
+            &m,
+            pos_hash,
+            &castling_right_long,
+            &castling_right_short,
+            half_move_of_last_capture,
+        );
 
         assert_eq!(game.half_move_number, 1);
         assert_eq!(game.move_number, 1);
@@ -1643,12 +1651,13 @@ mod tests {
             side: Side::White,
         };
 
+        let pos_hash = game.pos_hash;
         let castling_right_long = game.board.castling_right_long;
         let castling_right_short = game.board.castling_right_short;
         let half_move_of_last_capture = game.half_move_of_last_capture;
         game.make_move(&m);
 
-        game.update_board_undo_move(&m, &castling_right_long, &castling_right_short, half_move_of_last_capture);
+        game.update_board_undo_move(&m, pos_hash, &castling_right_long, &castling_right_short, half_move_of_last_capture);
 
         assert_eq!(game.board, board_initial);
     }
@@ -1858,6 +1867,7 @@ mod tests {
 
         let board_before_ep = game.board.clone();
         let ep_square_before = game.board.en_passant_square;
+        let pos_hash = game.pos_hash;
         let castling_right_long = game.board.castling_right_long;
         let castling_right_short = game.board.castling_right_short;
         let half_move_of_last_capture = game.half_move_of_last_capture;
@@ -1865,11 +1875,19 @@ mod tests {
         game.make_move(&ep_move);
 
         assert_eq!(game.board.en_passant_square, 0);
+        assert_eq!(game.position_occurance_counter.get(&pos_hash).unwrap(), &1usize);
 
-        game.update_board_undo_move(&ep_move, &castling_right_long, &castling_right_short, half_move_of_last_capture);
+        game.update_board_undo_move(
+            &ep_move,
+            pos_hash,
+            &castling_right_long,
+            &castling_right_short,
+            half_move_of_last_capture,
+        );
 
         assert_eq!(game.board, board_before_ep);
         assert_eq!(game.board.en_passant_square, ep_square_before);
+        assert_eq!(game.position_occurance_counter.get(&pos_hash).unwrap(), &0usize);
     }
 
     #[test]

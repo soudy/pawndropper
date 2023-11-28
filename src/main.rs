@@ -8,7 +8,7 @@ mod magic;
 mod zobrist;
 mod cli;
 
-use crate::board::{Board, Piece, Side};
+use crate::board::{Piece, Side};
 use crate::game::GameState;
 use crate::magic::MagicBitboard;
 use crate::move_bitboards::MoveBitboards;
@@ -36,6 +36,26 @@ fn print_legal_moves(side: Side, moves: &Vec<Move>) {
     info!("[{:?}] Legal moves: [{}]", side, moves_str);
 }
 
+fn print_principal_variation(game: &GameState, pv: &Vec<Move>, mut legal_moves: Vec<Move>) {
+    let mut game_clone = game.clone();
+    let mut moves_str = "".to_owned();
+
+    if game.board.side_to_move.opposite() == Side::Black {
+        moves_str.push_str("..");
+    }
+
+    for m in pv {
+        if (game_clone.half_move_number - 1) % 2 != 0 {
+            moves_str.push_str(&format!("{}. ", game_clone.move_number));
+        }
+        moves_str.push_str(&m.to_algebraic_with_state(&legal_moves));
+        moves_str.push_str(" ");
+
+        (_, legal_moves) = game_clone.make_move(m);
+    }
+    info!("Principal variation: {}", moves_str);
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(
         Env::default().default_filter_or("pawndropper=info")
@@ -46,7 +66,7 @@ fn main() -> Result<()> {
     let args = cli::Args::parse();
 
     // Initialise engine states (search thread pool, pseudo-legal moves, etc.)
-    let searcher = SearchAsync::new(args.n_threads);
+    let mut searcher = SearchAsync::new();
     let pseudo_legal_moves = MoveBitboards::init_legal_moves();
     let magics = MagicBitboard::init_precomputed(&pseudo_legal_moves);
     //
@@ -134,8 +154,8 @@ fn main() -> Result<()> {
 
                         // Computer move
                         let start = Instant::now();
-                        let (best_eval, best_move) =
-                            searcher.find_best_legal_move(&mut game, &legal_moves, args.depth);
+                        let (best_eval, best_move, pv) =
+                            searcher.find_best_legal_move(&mut game, args.depth);
                         let duration = start.elapsed();
 
                         info!("Search took {:?}", duration);
@@ -153,6 +173,7 @@ fn main() -> Result<()> {
 
                         println!("{}", game.board.to_ascii(cpu_side.opposite()));
                         info!("Eval: {:.3}", best_eval);
+                        print_principal_variation(&game, &pv, legal_moves.clone());
 
                         let moves_since_capture =
                             (game.half_move_number - game.half_move_of_last_capture) / 2;

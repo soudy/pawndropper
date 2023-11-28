@@ -419,7 +419,10 @@ impl Board {
 
             fmt.push_str(&format!("{}  ", RANKS[BOARD_HEIGHT - j - 1]));
 
-            for i in 0..BOARD_WIDTH {
+            for mut i in 0..BOARD_WIDTH {
+                if play_side == Side::Black {
+                    i = BOARD_HEIGHT - 1 - i;
+                }
                 let pos: u64 = 1 << ((u64::BITS as usize) - 1 - (8 * j + i));
                 let mut no_piece = true;
                 'piece: for piece in Piece::VALUES {
@@ -444,7 +447,7 @@ impl Board {
                     fmt.push_str(".");
                 }
 
-                if i != BOARD_WIDTH - 1 {
+                if (play_side == Side::White && i != BOARD_WIDTH - 1) || (play_side == Side::Black && i != 0) {
                     fmt.push_str(" ");
                 }
             }
@@ -454,7 +457,10 @@ impl Board {
         }
 
         fmt.push_str("\n\n   ");
-        for j in 0..BOARD_WIDTH {
+        for mut j in 0..BOARD_WIDTH {
+            if play_side == Side::Black {
+                j = BOARD_WIDTH - 1 - j
+            }
             fmt.push_str(&format!("{} ", FILES[BOARD_WIDTH - j - 1]));
         }
         fmt.push_str("\n");

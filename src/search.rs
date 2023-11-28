@@ -1,12 +1,9 @@
+use std::collections::HashMap;
+
 use crate::board::Side;
 use crate::game::GameState;
-use crate::r#move::Move;
 use crate::eval::eval;
-use crate::r#move::MoveResult;
-
-use rayon::ThreadPool;
-use rayon::prelude::*;
-use dashmap::DashMap;
+use crate::r#move::{Move, MoveResult, NULL_MOVE};
 
 #[derive(PartialEq)]
 enum TransitionTableFlag {
@@ -15,236 +12,226 @@ enum TransitionTableFlag {
     Alpha
 }
 
+pub const MAX_KILLER_MOVES: usize = 2;
+pub const MAX_GAME_PLY: usize = 1024;
+
 pub struct SearchAsync {
-    pool: ThreadPool,
-    tt: DashMap<u64, (f64, usize, TransitionTableFlag)>
+    tt: HashMap<u128, (f64, usize, TransitionTableFlag)>,
+    killer_list: [[Move; MAX_GAME_PLY]; MAX_KILLER_MOVES],
+    best_move: Move,
+    pv_list: Vec<Move>
 }
 
 impl SearchAsync {
-    const EVAL_CACHE_CAPACITY: usize = 1_000_000;
+    const TRANSITION_TABLE_CAPACITY: usize = 1_000_000;
 
-    pub fn new(n_threads: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            pool: rayon::ThreadPoolBuilder::new()
-                .num_threads(n_threads)
-                .build()
-                .unwrap(),
-            tt: DashMap::with_capacity(Self::EVAL_CACHE_CAPACITY)
+            tt: HashMap::with_capacity(Self::TRANSITION_TABLE_CAPACITY),
+            killer_list: [[NULL_MOVE; MAX_GAME_PLY]; MAX_KILLER_MOVES],
+            best_move: NULL_MOVE,
+            pv_list: vec![]
         }
     }
 
     pub fn find_best_legal_move(
-        &self,
+        &mut self,
         game: &mut GameState,
-        legal_moves: &Vec<Move>,
         depth: usize,
-    ) -> (f64, Move) {
-        let move_evals: Vec<(f64, &Move)> = self.pool.install(|| {
-            legal_moves.into_par_iter().map(|m| {
-                let mut branched_game = game.clone();
+    ) -> (f64, Move, Vec<Move>) {
+        let (mut legal_moves_opposite, in_check) = game.get_legal_moves();
+        self.order_moves(&mut legal_moves_opposite, 1);
 
-                branched_game.update_board_with_move(m);
-                let (mut legal_moves_opposite, in_check) = branched_game.get_legal_moves();
-
-                self.order_moves(&mut legal_moves_opposite);
-
-                let move_eval = self.minimax(
-                    &mut branched_game,
-                    &legal_moves_opposite,
-                    depth,
-                    1,
-                    in_check,
-                    f64::MIN,
-                    f64::MAX,
-                );
-
-                (move_eval, m)
-            }).collect()
-        });
-
-        let mut best_eval = if game.board.side_to_move == Side::White {
-            f64::MIN
+        let alpha = f64::MIN;
+        let beta = f64::MAX;
+        let mult = if game.board.side_to_move == Side::White {
+            1.0
         } else {
-            f64::MAX
+            -1.0
         };
-        let mut best_move = legal_moves[0];
 
-        for (eval, m) in move_evals {
-            if game.board.side_to_move == Side::White && eval > best_eval {
-                best_eval = eval;
-                best_move = *m;
-            } else if game.board.side_to_move == Side::Black && eval < best_eval {
-                best_eval = eval;
-                best_move = *m;
-            }
-        }
+        let mut root_pv: Vec<Move> = vec![];
 
-        (best_eval, best_move)
+        let eval = self.negamax(
+            game,
+            &legal_moves_opposite,
+            depth,
+            1,
+            in_check,
+            alpha,
+            beta,
+            &mut root_pv
+        );
+        (mult*eval, self.best_move, root_pv)
     }
 
-    pub fn minimax(
-        &self,
+    pub fn negamax(
+        &mut self,
         game: &mut GameState,
         legal_moves: &Vec<Move>,
         mut max_depth: usize,
-        depth: usize,
+        ply: usize,
         in_check: bool,
         mut alpha: f64,
-        mut beta: f64,
+        beta: f64,
+        pv: &mut Vec<Move>
     ) -> f64 {
-        if in_check {
+        if in_check || legal_moves.len() == 1 {
             max_depth += 1;
         }
 
-        if depth >= max_depth {
-            return self.qsearch(game, legal_moves, max_depth + 3, depth, in_check, alpha, beta);
+        if ply >= max_depth {
+            return self.qsearch(
+                game,
+                legal_moves,
+                max_depth + 15,
+                ply,
+                in_check,
+                alpha,
+                beta,
+                pv
+            );
         }
 
-        // let tt_entry = self.tt.get(&game.pos_hash);
-        // if let Some(eval) = tt_entry  {
-            // let tt_eval = eval.0;
-            // let tt_depth = eval.1;
-            // let tt_flag = &eval.2;
+        if legal_moves.len() == 0 {
+            let mult = if game.board.side_to_move == Side::White {
+                1.0
+            } else {
+                -1.0
+            };
+            let move_result = game.get_move_result(legal_moves, in_check);
 
-            // let use_tt_entry = tt_depth > depth &&
-                // (*tt_flag == TransitionTableFlag::Exact
-                 // || (*tt_flag == TransitionTableFlag::Beta && tt_eval >= beta)
-                 // || (*tt_flag == TransitionTableFlag::Alpha && tt_eval <= alpha));
+            match move_result {
+                Some(MoveResult::Checkmate) => {
+                    return mult*(2000.0 + ply as f64)
+                }
+                Some(MoveResult::Draw(_)) => return 0.0,
+                _ => (),
+            }
+        }
 
-            // if use_tt_entry {
-                // return tt_eval;
-            // }
-        // }
+        let tt_entry = self.tt.get(&game.pos_hash);
+        if let Some(eval) = tt_entry  {
+            let tt_eval = eval.0;
+            let tt_depth = eval.1;
+            let tt_flag = &eval.2;
+
+            let use_tt_entry = tt_depth > ply &&
+                (*tt_flag == TransitionTableFlag::Exact
+                 || (*tt_flag == TransitionTableFlag::Beta && tt_eval >= beta)
+                 || (*tt_flag == TransitionTableFlag::Alpha && tt_eval <= alpha));
+
+            if use_tt_entry {
+                return tt_eval;
+            }
+        }
 
         // Needed for undoing moves
+        let pos_hash = game.pos_hash;
         let castling_right_long = game.board.castling_right_long;
         let castling_right_short = game.board.castling_right_short;
         let half_move_of_last_capture = game.half_move_of_last_capture;
 
         let mut best_eval: f64;
 
-        if game.board.side_to_move == Side::White {
-            best_eval = f64::MIN;
+        best_eval = f64::MIN;
 
-            for m in legal_moves {
-                game.update_board_with_move(m);
+        for m in legal_moves {
+            let mut node_pv: Vec<Move> = vec![];
 
-                let (mut legal_moves_opposite, in_check) = game.get_legal_moves();
-                self.order_moves(&mut legal_moves_opposite);
+            game.update_board_with_move(m);
 
-                let eval = self.minimax(
-                    game,
-                    &legal_moves_opposite,
-                    max_depth,
-                    depth + 1,
-                    in_check,
-                    alpha,
-                    beta,
-                );
+            let (mut legal_moves_opposite, in_check) = game.get_legal_moves();
+            self.order_moves(&mut legal_moves_opposite, ply);
 
-                game.update_board_undo_move(
-                    m,
-                    &castling_right_long,
-                    &castling_right_short,
-                    half_move_of_last_capture,
-                );
+            let eval = -self.negamax(
+                game,
+                &legal_moves_opposite,
+                max_depth,
+                ply + 1,
+                in_check,
+                -beta,
+                -alpha,
+                &mut node_pv
+            );
 
-                if eval > best_eval {
-                    best_eval = eval;
-                }
-                
-                if eval > alpha {
-                    alpha = eval;
-                }
+            game.update_board_undo_move(
+                m,
+                pos_hash,
+                &castling_right_long,
+                &castling_right_short,
+                half_move_of_last_capture,
+            );
 
-                if eval >= beta {
-                    break;
+            if eval > best_eval {
+                best_eval = eval;
+                if ply == 1 {
+                    self.best_move = *m;
                 }
             }
+
+            if eval >= beta {
+                self.store_killer(m, ply);
+                return beta;
+            }
+            
+            if eval > alpha {
+                alpha = eval;
+
+                pv.clear();
+                pv.push(*m);
+                pv.append(&mut node_pv);
+            }
+        }
+
+        let flag = if best_eval >= beta {
+            TransitionTableFlag::Beta
+        } else if best_eval > alpha {
+            TransitionTableFlag::Exact
         } else {
-            best_eval = f64::MAX;
-
-            for m in legal_moves {
-                game.update_board_with_move(m);
-
-                let (mut legal_moves_opposite, in_check) = game.get_legal_moves();
-                self.order_moves(&mut legal_moves_opposite);
-
-                let eval = self.minimax(
-                    game,
-                    &legal_moves_opposite,
-                    max_depth,
-                    depth + 1,
-                    in_check,
-                    alpha,
-                    beta,
-                );
-
-                game.update_board_undo_move(
-                    m,
-                    &castling_right_long,
-                    &castling_right_short,
-                    half_move_of_last_capture,
-                );
-
-                if eval < best_eval {
-                    best_eval = eval;
-                }
-
-                if eval < beta {
-                    beta = eval;
-                }
-
-                if eval <= alpha {
-                    break;
-                }
-            }
+            TransitionTableFlag::Alpha
         };
+        self.tt.insert(game.pos_hash, (alpha, ply, flag));
 
-        // let flag = if best_eval >= beta {
-            // TransitionTableFlag::Beta
-        // } else if best_eval > alpha {
-            // TransitionTableFlag::Exact
-        // } else {
-            // TransitionTableFlag::Alpha
-        // };
-        // self.tt.insert(game.pos_hash, (alpha, depth, flag));
-
-        best_eval
+        alpha
     }
 
     fn qsearch(
-        &self,
+        &mut self,
         game: &mut GameState,
         legal_moves: &Vec<Move>,
         max_depth: usize,
-        depth: usize,
+        ply: usize,
         in_check: bool,
         mut alpha: f64,
         beta: f64,
+        pv: &mut Vec<Move>
     ) -> f64 {
         // Continue searching until the position is quiet, i.e. positions where
         // there are no winning tactical moves to be made.
         // This avoids the horizon effect
-        let mut stand_pat = eval(game);
+        let mult = if game.board.side_to_move == Side::White {
+            1.0
+        } else {
+            -1.0
+        };
+        let stand_pat = mult*eval(game);
 
         let move_result = game.get_move_result(legal_moves, in_check);
 
-        if let Some(MoveResult::Checkmate) = move_result {
-            if game.board.side_to_move == Side::White {
-                return -2000.0;
-            } else {
-                return 2000.0;
+        match move_result {
+            Some(MoveResult::Checkmate) => {
+                return mult*(2000.0 + ply as f64)
             }
-        } else if let Some(MoveResult::Draw(_)) = move_result {
-            return 0.0;
+            Some(MoveResult::Draw(_)) => return 0.0,
+            _ => (),
         }
 
-        if depth >= max_depth {
+        if ply >= max_depth {
             return stand_pat;
         }
 
-        if !in_check && stand_pat >= beta {
+        if stand_pat >= beta {
             return beta;
         }
 
@@ -254,6 +241,7 @@ impl SearchAsync {
 
         let old_alpha = alpha;
 
+        let pos_hash = game.pos_hash;
         let castling_right_long = game.board.castling_right_long;
         let castling_right_short = game.board.castling_right_short;
         let half_move_of_last_capture = game.half_move_of_last_capture;
@@ -265,63 +253,74 @@ impl SearchAsync {
                 continue;
             }
 
+            let mut node_pv: Vec<Move> = vec![];
+
             game.update_board_with_move(m);
 
             let (mut legal_moves_opposite, in_check) = game.get_legal_moves();
-            self.order_moves(&mut legal_moves_opposite);
+            self.order_moves(&mut legal_moves_opposite, ply);
 
             let eval = -self.qsearch(
                 game,
                 &legal_moves_opposite,
                 max_depth,
-                depth + 1,
+                ply + 1,
                 in_check,
-                -alpha,
                 -beta,
+                -alpha,
+                &mut node_pv
             );
 
             game.update_board_undo_move(
                 m,
+                pos_hash,
                 &castling_right_long,
                 &castling_right_short,
                 half_move_of_last_capture,
             );
 
-            if eval > stand_pat {
-                stand_pat = eval;
-            }
-
             if eval >= beta {
-                break;
+                return beta;
             }
 
             if eval > alpha {
                 alpha = eval;
+
+                pv.clear();
+                pv.push(*m);
+                pv.append(&mut node_pv);
             }
         }
 
-        // let flag = if stand_pat >= beta {
-            // TransitionTableFlag::Beta
-        // } else if stand_pat > old_alpha {
-            // TransitionTableFlag::Exact
-        // } else {
-            // TransitionTableFlag::Alpha
-        // };
-        // self.tt.insert(game.pos_hash, (alpha, depth, flag));
+        let flag = if stand_pat >= beta {
+            TransitionTableFlag::Beta
+        } else if stand_pat > old_alpha {
+            TransitionTableFlag::Exact
+        } else {
+            TransitionTableFlag::Alpha
+        };
+        self.tt.insert(game.pos_hash, (alpha, ply, flag));
 
         alpha
     }
 
-    fn order_moves(&self, moves: &mut Vec<Move>) {
-        self.pool.install(|| {
-            moves.par_sort_unstable_by(|a, b| {
-                // check captures first
-                b.prio().cmp(&a.prio())
-            });
+    fn store_killer(&mut self, m: &Move, ply: usize) {
+        let first_killer = &self.killer_list[0][ply];
+
+        if first_killer != m {
+            // Shift killer moves one index up
+            for i in (1..MAX_KILLER_MOVES).rev() {
+                let prev = self.killer_list[i - 1][ply];
+                self.killer_list[i][ply] = prev;
+            }
+        }
+
+        self.killer_list[0][ply] = *m;
+    }
+
+    fn order_moves(&self, moves: &mut Vec<Move>, ply: usize) {
+        moves.sort_unstable_by(|a, b| {
+            b.prio(ply, &self.killer_list).cmp(&a.prio(ply, &self.killer_list))
         });
-        // moves.sort_by(|a, b| {
-            // // check moves with lowest pieces first
-            // (a.piece as usize).cmp(&(b.piece as usize))
-        // });
     }
 }

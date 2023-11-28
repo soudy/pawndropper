@@ -1,5 +1,6 @@
 use crate::board::{Piece, Side};
 use crate::move_bitboards::{file, rank};
+use crate::search::{MAX_GAME_PLY, MAX_KILLER_MOVES};
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum MoveType {
@@ -36,6 +37,14 @@ pub struct Move {
     pub piece: Piece,
     pub side: Side,
 }
+
+pub const NULL_MOVE: Move = Move {
+    from_square: 100,
+    to_square: 100,
+    move_type: MoveType::Quiet,
+    piece: Piece::Pawn,
+    side: Side::White
+};
 
 impl Move {
     const PIECE_SYMBOLS: &[&'static str] = &["", "N", "B", "R", "Q", "K"];
@@ -134,31 +143,48 @@ impl Move {
         self.move_type == MoveType::CastleShort || self.move_type == MoveType::CastleLong
     }
 
-    pub fn prio(&self) -> u64 {
-        let mut score = 10;
+    const MVVLA: [[u32; 6]; 6] = [
+        [15, 14, 13, 12, 11, 10], // Victim Pawn
+        [25, 24, 23, 22, 21, 20], // Victim Knight
+        [35, 34, 33, 32, 31, 30], // Victim Bishop
+        [45, 44, 43, 42, 41, 40], // Victim Rook
+        [55, 54, 53, 52, 51, 50], // Victim Queen
+        [0, 0, 0, 0, 0, 0], // Victim King (impossible)
+    ];
 
-        if self.is_capture() {
-            score += 10;
-            score -= self.piece as u64;
+    const MVV_LVA_OFFSET: u32 = u32::MAX - 256;
+    const KILLER_SCORE: u32 = 10;
+
+    pub fn prio(&self, ply: usize, killer_list: &[[Move; MAX_GAME_PLY]; MAX_KILLER_MOVES]) -> u32 {
+        let mut score = 0;
+
+        if let MoveType::Capture(capture_target) | MoveType::CapturePromotion(capture_target, _)
+                | MoveType::EnPassantCapture(capture_target) = self.move_type {
+            score = Self::MVVLA[capture_target as usize][self.piece as usize];
+        } else {
+            let mut i = 0;
+            while i < MAX_KILLER_MOVES && score == 0 {
+                let killer_move = killer_list[i][ply];
+                if self == &killer_move {
+                    score = Self::MVV_LVA_OFFSET - ((i as u32 + 1)*Self::KILLER_SCORE);
+                }
+
+                i += 1;
+            }
         }
 
         if let MoveType::Promotion(promotion_piece) | MoveType::CapturePromotion(_, promotion_piece) = self.move_type {
-            score += 20;
-            score += promotion_piece as u64;
+            score += promotion_piece as u32;
         }
-
-        // Consider moves close to the center first
-        // score -= (4 - file(self.from_square) as i8).abs() as u64;
 
         score
     }
-
 }
 
 pub const FILES: &[&str] = &["h", "g", "f", "e", "d", "c", "b", "a"];
 pub const RANKS: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8"];
 fn idx_to_square(idx: usize) -> String {
-    let file = file(idx);
-    let rank = rank(idx);
-    format!("{}{}", FILES[file], RANKS[rank])
+    let idx_file = file(idx);
+    let idx_rank = rank(idx);
+    format!("{}{}", FILES[idx_file], RANKS[idx_rank])
 }

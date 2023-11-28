@@ -5,21 +5,21 @@ use rand::Rng;
 
 #[derive(Debug, Clone)]
 pub struct ZobristHasher {
-    rands: [[[u64; N_SQUARES]; Piece::N_PIECES]; Side::N_SIDES],
-    black_to_move_rand: u64,
-    castling_right_long_rands: [u64; 4],
-    castling_right_short_rands: [u64; 4],
-    ep_file_rands: [u64; BOARD_WIDTH],
+    rands: [[[u128; N_SQUARES]; Piece::N_PIECES]; Side::N_SIDES],
+    black_to_move_rand: u128,
+    castling_right_long_rands: [u128; 4],
+    castling_right_short_rands: [u128; 4],
+    ep_file_rands: [u128; BOARD_WIDTH],
 }
 
 impl ZobristHasher {
     pub fn new() -> Self {
         let mut hash_instance = Self {
-            rands: [[[0u64; N_SQUARES]; Piece::N_PIECES]; Side::N_SIDES],
+            rands: [[[0u128; N_SQUARES]; Piece::N_PIECES]; Side::N_SIDES],
             black_to_move_rand: 0,
-            castling_right_long_rands: [0u64; 4],
-            castling_right_short_rands: [0u64; 4],
-            ep_file_rands: [0u64; BOARD_WIDTH]
+            castling_right_long_rands: [0u128; 4],
+            castling_right_short_rands: [0u128; 4],
+            ep_file_rands: [0u128; BOARD_WIDTH]
         };
 
         let mut rng = rand::thread_rng();
@@ -27,27 +27,27 @@ impl ZobristHasher {
         for side in Side::VALUES {
             for piece in Piece::VALUES {
                 for i in 0..N_SQUARES {
-                    hash_instance.rands[side as usize][piece as usize][i] = rng.gen::<u64>();
+                    hash_instance.rands[side as usize][piece as usize][i] = rng.gen::<u128>();
                 }
             }
         }
 
-        hash_instance.black_to_move_rand = rng.gen::<u64>();
+        hash_instance.black_to_move_rand = rng.gen::<u128>();
 
         for i in 0..4 {
-            hash_instance.castling_right_long_rands[i] = rng.gen::<u64>();
-            hash_instance.castling_right_short_rands[i] = rng.gen::<u64>();
+            hash_instance.castling_right_long_rands[i] = rng.gen::<u128>();
+            hash_instance.castling_right_short_rands[i] = rng.gen::<u128>();
         }
 
         for i in 0..BOARD_WIDTH {
-            hash_instance.ep_file_rands[i] = rng.gen::<u64>();
+            hash_instance.ep_file_rands[i] = rng.gen::<u128>();
         }
 
         hash_instance
     }
 
-    pub fn hash(&self, board: &Board) -> u64 {
-        let mut hash = 0u64;
+    pub fn hash(&self, board: &Board) -> u128 {
+        let mut hash = 0u128;
 
         // Hash side to play
         if board.side_to_move == Side::Black {
